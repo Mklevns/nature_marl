@@ -216,3 +216,6 @@ def test_environment_creation(debug: bool = True) -> bool:
 if __name__ == "__main__":
     # Run environment test when executed directly
     test_environment_creation(debug=True)
+else:
+    # Register environment when imported by other modules
+    register_nature_comm_environment()

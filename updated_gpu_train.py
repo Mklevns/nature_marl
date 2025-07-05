@@ -410,9 +410,6 @@ def train_with_max_gpu():
     # Configuration
     num_agents = 8  # More agents for complexity
 
-    # Register environment
-    register_env("optimized_multi_env", lambda config: OptimizedMultiAgentEnv(config))
-
     # Create optimized config
     print(f"\n⚙️ Creating config for {num_agents} agents with large networks...")
     config = create_optimized_ppo_config(num_agents)
@@ -498,7 +495,7 @@ def train_with_max_gpu():
 
             # Save checkpoints
             if (i + 1) % 20 == 0:
-                checkpoint = algo.save(results_dir / f"checkpoint_{i+1}")
+                checkpoint = algo.save(f"file://{results_dir / f'checkpoint_{i+1}'}")
                 print(f"💾 Checkpoint saved: {checkpoint}")
 
                 # Force GPU memory measurement
@@ -526,7 +523,7 @@ def train_with_max_gpu():
 
         # Save final model
         try:
-            final_checkpoint = algo.save(str(results_dir / "final_model"))
+            final_checkpoint = algo.save(f"file://{(results_dir / 'final_model').absolute()}")
             print(f"\n💾 Final model saved: {final_checkpoint}")
         except:
             pass
