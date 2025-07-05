@@ -49,7 +49,12 @@ class NatureInspiredCommModule(TorchRLModule):
     def setup(self):
         """Setup neural network components during initialization."""
         # Get dimensions from spaces
-        obs_dim = self.observation_space.shape[0]
+        # The RLModule receives the single agent's observation space, but for a shared policy
+        # with concatenated observations, the actual input dimension will be num_agents * obs_dim.
+        single_agent_obs_dim = self.observation_space.shape[0]
+        num_agents = self.model_config.get("num_agents", 1) # Get num_agents from model_config
+        true_obs_dim = single_agent_obs_dim * num_agents
+
         if isinstance(self.action_space, Discrete):
             action_dim = self.action_space.n
         else:
@@ -59,17 +64,44 @@ class NatureInspiredCommModule(TorchRLModule):
         self.comm_dim = 8  # Size of pheromone-like signals
         self.memory_dim = 16  # Neural memory capacity
 
+        # Access model_config for fcnet_hiddens, if provided.
+        # Default to a smaller size if not specified.
+        fcnet_hiddens = self.model_config.get("fcnet_hiddens", [64, 64])
+        fcnet_activation = self.model_config.get("fcnet_activation", "relu")
+
+        # Helper to create a sequential network based on hiddens and activation
+        def create_fcn_network(input_dim, output_dim, hiddens, activation):
+            activation_map = {
+                "relu": nn.ReLU,
+                "tanh": nn.Tanh,
+                "sigmoid": nn.Sigmoid,
+                "leaky_relu": nn.LeakyReLU,
+            }
+            activation_layer = activation_map.get(activation.lower())
+            if activation_layer is None:
+                raise ValueError(f"Unsupported activation function: {activation}")
+
+            layers = []
+            current_dim = input_dim
+            for h_dim in hiddens:
+                layers.append(nn.Linear(current_dim, h_dim))
+                layers.append(activation_layer())
+                current_dim = h_dim
+            layers.append(nn.Linear(current_dim, output_dim))
+            return nn.Sequential(*layers)
+
         # Observation encoder (sensory processing)
+        # Use true_obs_dim for the input layer, and larger hidden layers
         self.obs_encoder = nn.Sequential(
-            nn.Linear(obs_dim, 64),
+            nn.Linear(true_obs_dim, 1024), # Adjusted input and first hidden layer size
             nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.LayerNorm(32),  # Stabilize training
+            nn.Linear(1024, 512), # Second hidden layer
+            nn.LayerNorm(512),  # Stabilize training
         )
 
         # Communication signal generator (pheromone production)
         self.comm_encoder = nn.Sequential(
-            nn.Linear(32, self.comm_dim),
+            nn.Linear(512, self.comm_dim),
             nn.Tanh()  # Bounded signals like chemical concentrations
         )
 
@@ -77,31 +109,17 @@ class NatureInspiredCommModule(TorchRLModule):
         self.comm_decoder = nn.Sequential(
             nn.Linear(self.comm_dim, 16),
             nn.ReLU(),
-            nn.Linear(16, 32)
+            nn.Linear(16, 512)
         )
 
         # Neural plasticity memory (experience integration)
-        self.memory_update = nn.GRUCell(32 + self.comm_dim, self.memory_dim)
+        self.memory_update = nn.GRUCell(512 + self.comm_dim, self.memory_dim)
 
-        # Policy network (decision making)
-        self.policy_net = nn.Sequential(
-            nn.Linear(32 + self.memory_dim, 64),
-            nn.ReLU(),
-            nn.Dropout(0.1),  # Prevent overfitting
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, action_dim)
-        )
+        # Policy network (decision making) - now using fcnet_hiddens
+        self.policy_net = create_fcn_network(512 + self.memory_dim, action_dim, fcnet_hiddens, fcnet_activation)
 
-        # Value network (outcome prediction)
-        self.value_net = nn.Sequential(
-            nn.Linear(32 + self.memory_dim, 64),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-        )
+        # Value network (outcome prediction) - now using fcnet_hiddens
+        self.value_net = create_fcn_network(512 + self.memory_dim, 1, fcnet_hiddens, fcnet_activation)
 
         # Initialize persistent memory state
         self.register_buffer('hidden_state', torch.zeros(1, self.memory_dim))
@@ -188,5 +206,5 @@ def create_nature_comm_module_spec(obs_space, act_space, model_config=None):
         module_class=NatureInspiredCommModule,
         observation_space=obs_space,
         action_space=act_space,
-        model_config_dict=model_config or {}
+        model_config=model_config or {}
     )

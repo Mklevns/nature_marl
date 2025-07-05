@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-"""
-GPU Optimized MARL Training - Maximum Performance
-Optimized to fully utilize your RTX 4070 (12GB)
-"""
+# File: /marlcomm/updated_gpu_train.py
 
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -28,6 +24,177 @@ import torch
 import time
 from pathlib import Path
 
+# --- Start of rl_module.py content ---
+import torch.nn as nn
+from gymnasium.spaces import Box, Discrete
+from typing import Dict, Any
+from ray.rllib.core.rl_module.torch import TorchRLModule
+from ray.rllib.utils.typing import TensorType
+
+
+class NatureInspiredCommModule(TorchRLModule):
+    """
+    Custom RLModule implementing nature-inspired communication patterns.
+
+    Features:
+    - Pheromone-like communication signals (bounded chemical messaging)
+    - Neural plasticity memory (GRU-based experience retention)
+    - Adaptive behavior combining observations with communication history
+    """
+
+    def __init__(self, observation_space, action_space, *, model_config=None, **kwargs):
+        """
+        Initialize the nature-inspired communication module.
+
+        Args:
+            observation_space: Environment observation space
+            action_space: Environment action space
+            model_config: Model configuration dictionary
+            **kwargs: Additional parameters (inference_only, learner_only, etc.)
+        """
+        # Important: Use the new API stack constructor signature
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            model_config=model_config or {},
+            **kwargs
+        )
+
+    def setup(self):
+        """Setup neural network components during initialization."""
+        # Get dimensions from spaces
+        # The RLModule receives the single agent's observation space, but for a shared policy
+        # with concatenated observations, the actual input dimension will be num_agents * obs_dim.
+        single_agent_obs_dim = self.observation_space.shape[0]
+        num_agents = self.model_config.get("num_agents", 1) # Get num_agents from model_config
+        true_obs_dim = single_agent_obs_dim * num_agents
+
+        if isinstance(self.action_space, Discrete):
+            action_dim = self.action_space.n
+        else:
+            action_dim = self.action_space.shape[0]
+
+        # Communication and memory dimensions
+        self.comm_dim = 8  # Size of pheromone-like signals
+        self.memory_dim = 16  # Neural memory capacity
+
+        # Access model_config for fcnet_hiddens, if provided.
+        # Default to a smaller size if not specified.
+        fcnet_hiddens = self.model_config.get("fcnet_hiddens", [64, 64])
+        fcnet_activation = self.model_config.get("fcnet_activation", "relu")
+
+        # Helper to create a sequential network based on hiddens and activation
+        def create_fcn_network(input_dim, output_dim, hiddens, activation):
+            layers = []
+            current_dim = input_dim
+            for h_dim in hiddens:
+                layers.append(nn.Linear(current_dim, h_dim))
+                layers.append(getattr(nn, activation)())
+                current_dim = h_dim
+            layers.append(nn.Linear(current_dim, output_dim))
+            return nn.Sequential(*layers)
+
+        # Observation encoder (sensory processing)
+        # Use true_obs_dim for the input layer, and larger hidden layers
+        self.obs_encoder = nn.Sequential(
+            nn.Linear(true_obs_dim, 1024), # Adjusted input and first hidden layer size
+            nn.ReLU(),
+            nn.Linear(1024, 512), # Second hidden layer
+            nn.LayerNorm(512),  # Stabilize training
+        )
+
+        # Communication signal generator (pheromone production)
+        self.comm_encoder = nn.Sequential(
+            nn.Linear(32, self.comm_dim),
+            nn.Tanh()  # Bounded signals like chemical concentrations
+        )
+
+        # Communication signal decoder (pheromone detection)
+        self.comm_decoder = nn.Sequential(
+            nn.Linear(self.comm_dim, 16),
+            nn.ReLU(),
+            nn.Linear(16, 32)
+        )
+
+        # Neural plasticity memory (experience integration)
+        self.memory_update = nn.GRUCell(32 + self.comm_dim, self.memory_dim)
+
+        # Policy network (decision making) - now using fcnet_hiddens
+        self.policy_net = create_fcn_network(32 + self.memory_dim, action_dim, fcnet_hiddens, fcnet_activation)
+
+        # Value network (outcome prediction) - now using fcnet_hiddens
+        self.value_net = create_fcn_network(32 + self.memory_dim, 1, fcnet_hiddens, fcnet_activation)
+
+
+        # Initialize persistent memory state
+        self.register_buffer('hidden_state', torch.zeros(1, self.memory_dim))
+
+    def _forward(self, batch: Dict[str, TensorType], **kwargs) -> Dict[str, TensorType]:
+        """
+        Core forward pass implementing nature-inspired communication.
+
+        Args:
+            batch: Input batch containing observations
+            **kwargs: Additional forward arguments
+
+        Returns:
+            Dictionary with action distribution inputs and value predictions
+        """
+        obs = batch["obs"]
+        batch_size = obs.shape[0]
+
+        # Expand hidden state to match batch size if needed
+        if self.hidden_state.shape[0] != batch_size:
+            self.hidden_state = self.hidden_state.expand(batch_size, -1).contiguous()
+
+        # Sensory processing: encode environmental observations
+        obs_encoded = self.obs_encoder(obs)
+
+        # Communication signal generation (pheromone production)
+        comm_signal = self.comm_encoder(obs_encoded)
+
+        # Communication signal processing (pheromone detection)
+        # In real multi-agent setting, this would process signals from other agents
+        comm_processed = self.comm_decoder(comm_signal)
+
+        # Neural plasticity: update memory with new experience
+        try:
+            memory_input = torch.cat([obs_encoded, comm_signal], dim=1)
+            self.hidden_state = self.memory_update(memory_input, self.hidden_state)
+        except RuntimeError as e:
+            # Handle tensor size mismatches gracefully
+            if "size mismatch" in str(e).lower():
+                # Reset memory state and try again
+                self.hidden_state = torch.zeros(batch_size, self.memory_dim,
+                                              device=obs.device, dtype=obs.dtype)
+                self.hidden_state = self.memory_update(memory_input, self.hidden_state)
+            else:
+                raise e
+
+        # Integrate processed information for decision making
+        integrated_features = torch.cat([obs_encoded, self.hidden_state], dim=1)
+
+        # Generate action distribution parameters and value estimates
+        action_logits = self.policy_net(integrated_features)
+        value_pred = self.value_net(integrated_features).squeeze(-1)
+
+        return {
+            "action_dist_inputs": action_logits,  # For action sampling
+            "vf_preds": value_pred,  # For value function training
+            "comm_signal": comm_signal,  # For potential analysis/logging
+        }
+
+    def get_initial_state(self) -> Dict[str, TensorType]:
+        """Get initial state for recurrent processing."""
+        return {"hidden_state": torch.zeros(1, self.memory_dim)}
+
+    def is_stateful(self) -> bool:
+        """Indicate this module maintains internal state."""
+        return True
+
+# No need for create_nature_comm_module_spec helper for direct pasting logic
+# --- End of rl_module.py content ---
+
 print("🚀 GPU-Optimized MARL Training - Maximum Performance")
 print("=" * 60)
 
@@ -44,9 +211,6 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.tune.registry import register_env
-
-# Import custom RLModule
-from rl_module import NatureInspiredCommModule
 
 try:
     import gymnasium as gym
@@ -149,30 +313,16 @@ def create_optimized_ppo_config(num_agents):
     # The actual env registered for Ray will have wrappers.
     env = OptimizedMultiAgentEnv({"num_agents": num_agents})
 
-    # Original observation space (Dict of Boxes)
-    raw_obs_space = env.observation_space
-    raw_act_space = env.action_space
-
-    # After flattening, the observation space will be a single Box.
-    # For a shared policy, we need to know the shape of a single agent's *flattened* obs.
-    # Since all agents have the same (128,) Box obs, and there are `num_agents`,
-    # the flattened space will be (128 * num_agents,).
-    flattened_obs_space = gym.spaces.Box(
-        low=raw_obs_space["agent_0"].low[0], # Assuming same low/high for all agents
-        high=raw_obs_space["agent_0"].high[0],
-        shape=(raw_obs_space["agent_0"].shape[0] * num_agents,), # Flattened shape
-        dtype=raw_obs_space["agent_0"].dtype
-    )
-    # Action space for a single agent is Discrete(8)
-    single_agent_act_space = raw_act_space["agent_0"]
-
+    # Original observation space for a single agent
+    single_agent_obs_space = env.observation_space["agent_0"]
+    single_agent_act_space = env.action_space["agent_0"]
 
     config = (
         PPOConfig()
+        .experimental()
         .environment(
             env="optimized_multi_env", # <-- Use registered environment name
             env_config={"num_agents": num_agents},
-            # Removed env_creator parameter
         )
         .framework("torch")
         .resources(
@@ -191,31 +341,41 @@ def create_optimized_ppo_config(num_agents):
         .rl_module(
             rl_module_spec=RLModuleSpec(
                 module_class=NatureInspiredCommModule,
-                model_config={}
+                # Pass single agent's spaces and config for the module
+                observation_space=single_agent_obs_space,
+                action_space=single_agent_act_space,
+                model_config={
+                    "fcnet_hiddens": [1024, 1024, 512], # These will be passed to NatureInspiredCommModule
+                    "fcnet_activation": "relu",
+                    "vf_share_layers": False,
+                    "free_log_std": True,
+                }
             )
         )
-        .training( # Parameters that are direct arguments to AlgorithmConfig.training()
-            train_batch_size=16384,
+        .training(
+            train_batch_size_per_learner=16384,
+            minibatch_size=1024,
             num_epochs=20,
             lr=[ # Assign schedule directly to lr
                 [0, 5e-4],
                 [1000000, 1e-4],
             ],
             gamma=0.99,
-            minibatch_size=1024,
+            lambda_=0.95,
             clip_param=0.3,
             entropy_coeff=[ # Assign schedule directly to entropy_coeff
                 [0, 0.01],
                 [1000000, 0.001],
             ],
             vf_loss_coeff=0.5,
+            kl_coeff=0.2,
+            kl_target=0.02,
         )
         .multi_agent( # multi_agent remains here, chained after .training()
             policies={
                 # IMPORTANT: Policy's obs/act space must match the RLModule's expectation.
-                # Since we flatten observations for the RLModule, and it's a shared policy,
-                # the shared policy's obs space should be the *flattened* space.
-                "shared_policy": (None, flattened_obs_space, single_agent_act_space, {})
+                # It should be the single agent's observation space.
+                "shared_policy": (None, single_agent_obs_space, single_agent_act_space, {})
             },
             policy_mapping_fn=lambda agent_id, episode: "shared_policy", # Simplified signature
             count_steps_by="agent_steps",
@@ -224,16 +384,7 @@ def create_optimized_ppo_config(num_agents):
             log_level="ERROR",
             seed=42
         )
-        # .experimental(_disable_preprocessor_api=False) is removed.
     ) # This closes the PPOConfig chain
-
-    # PPO-SPECIFIC PARAMETERS set as direct attributes on the config object
-    # These are NOT arguments to the .training() method, but attributes of PPOConfig
-    config.lambda_ = 0.95
-    config.kl_coeff = 0.2
-    config.kl_target = 0.02
-
-    # entropy_coeff_schedule is now part of entropy_coeff, so removed from here
 
     return config
 
@@ -256,14 +407,11 @@ def train_with_max_gpu():
     resources = ray.available_resources()
     print(f"✅ Ray initialized - GPUs: {resources.get('GPU', 0)}, CPUs: {resources.get('CPU', 0)}")
 
-    # Register the environment creator function globally for Ray Tune
-    # Use a lambda to wrap create_optimized_multi_env_with_wrappers if needed,
-    # but direct registration is often cleaner.
-    register_env("optimized_multi_env", create_optimized_multi_env_with_wrappers)
-
     # Configuration
     num_agents = 8  # More agents for complexity
 
+    # Register environment
+    register_env("optimized_multi_env", lambda config: OptimizedMultiAgentEnv(config))
 
     # Create optimized config
     print(f"\n⚙️ Creating config for {num_agents} agents with large networks...")
@@ -272,7 +420,7 @@ def train_with_max_gpu():
     # Build algorithm
     print("🔨 Building algorithm...")
     try:
-        algo = config.build_algo() # Corrected from config.build()
+        algo = config.build()
         print("✅ Algorithm ready!")
     except Exception as e:
         print(f"❌ Build failed: {e}")
@@ -378,7 +526,7 @@ def train_with_max_gpu():
 
         # Save final model
         try:
-            final_checkpoint = algo.save(results_dir / "final_model")
+            final_checkpoint = algo.save(str(results_dir / "final_model"))
             print(f"\n💾 Final model saved: {final_checkpoint}")
         except:
             pass

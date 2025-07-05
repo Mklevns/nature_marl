@@ -72,6 +72,7 @@ def test_rl_module():
             action_space=act_space,
             model_config={"comm_channels": 8}
         )
+        module.setup() # Explicitly call setup for testing
         
         print("✅ RLModule creation successful")
         
