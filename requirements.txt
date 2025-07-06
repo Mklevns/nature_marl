@@ -1,17 +1,19 @@
-# Core ML frameworks
+# Verified Production-Ready Stack for Nature-Inspired MARL
+# Based on MARL Development Guide Research_.pdf [cite: 1584-1604]
+ray[rllib]==2.9.0
 torch>=2.0.0
-numpy==1.24.3  # Compatible with Ray 2.5-2.9
-opencv-python>=4.8.0  # Alternative to scikit-image
-
-# Ray and RLlib
-ray[rllib]>=2.9.0,<2.10.0 # Stricter ray version for compatibility
-
-# Environments - Compatible versions
-gymnasium==0.28.1  # Adjusted for Ray[RLlib] 2.9.x compatibility
+numpy==1.24.3
+gymnasium==0.28.1
 pettingzoo>=1.24.0
-supersuit==3.8.0  # Adjusted for Gymnasium 0.28.1 compatibility
+supersuit==3.8.0
 
-# Other dependencies
-matplotlib>=3.5.0
-nvidia-ml-py3>=7.352.0
-tensorboard>=2.11.0
+# System & Hardware Monitoring
+psutil
+gputil
+
+# Analysis & Visualization
+matplotlib
+seaborn
+pandas
+scikit-learn
+networkx
