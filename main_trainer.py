@@ -1,373 +1,556 @@
-# File: nature_marl/main_trainer.py
 #!/usr/bin/env python3
 """
-Unified Orchestrator for Nature-Inspired Multi-Agent Reinforcement Learning
-
-This script serves as the main entry point for training and experimentation, merging
-functionalities for hardware optimization, environment setup, model configuration,
-and training execution into a single, robust workflow.
-
-It is built upon the Ray RLlib 2.9.x API stack (RLModule, AlgorithmConfig).
-
-Example Usage:
-  # Run a basic foraging experiment on CPU for 50 iterations
-  python main_trainer.py --env foraging --agents 5 --iterations 50 --hardware cpu
-
-  # Run a more complex predator-prey experiment on GPU
-  python main_trainer.py --env predator_prey --agents 10 --iterations 200 --hardware gpu
-
-  # Run system-level tests without training
-  python main_trainer.py --test-only
+Main trainer for bio-inspired multi-agent reinforcement learning.
+Updated for RLlib 2.9.x with the new API stack.
 """
 
-import sys
 import argparse
-import warnings
-import traceback
-from pathlib import Path
+import os
+import sys
 from datetime import datetime
-import time
+from pathlib import Path
+from typing import Dict, Any, Optional
 import json
-import numpy as np
 
-# Suppress various warnings for cleaner output
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterwarnings("ignore", category=UserWarning, module="pygame")
-
-# Add current directory to path for local imports
-sys.path.append(str(Path(__file__).parent))
-
-# --- Core MARL-DevGPT Modules ---
-from emergence_environments import create_emergence_environment
-from reward_engineering import RewardEngineer, RewardPresets
-from reward_engineering_wrapper import RewardEngineeringWrapper
-from communication_metrics import CommunicationAnalyzer
-from real_emergence_callbacks import RealEmergenceTrackingCallbacks
-from rl_module import NatureInspiredCommModule
-from training_config import TrainingConfigFactory, print_hardware_summary
-
-# --- Ray RLlib 2.9.0 Core Imports ---
 import ray
 from ray import tune
-from ray.rllib.algorithms.ppo import PPOConfig
-from ray.rllib.env.wrappers.pettingzoo_env import ParallelPettingZooEnv
-from ray.rllib.core.rl_module.rl_module import SingleAgentRLModuleSpec
+from ray.rllib.algorithms.ppo import PPO
+from ray.rllib.env.multi_agent_env import MultiAgentEnv
+from ray.rllib.utils.framework import try_import_torch
+from ray.tune.logger import pretty_print
 from ray.tune.registry import register_env
-from ray.tune import Tuner, TuneConfig, TuneError
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Import from marlcomm package
+from marlcomm.config.training_config import (
+    create_config_for_experiment,
+    list_experiments,
+    EXPERIMENT_CONFIGS
+)
+from marlcomm.utils.callbacks import BioInspiredCallbacks
+from marlcomm.utils.logging_config import setup_logging
+from marlcomm.environments.emergence_environments import (
+    CommunicationEnv,  # Adjust based on your actual environment
+)
+
+# Import torch to check CUDA
+torch, _ = try_import_torch()
 
 
-def create_env_with_wrappers(env_config_from_ray: dict):
-    """
-    Global environment creator function for Ray Tune.
-    Instantiates the base environment and applies necessary wrappers.
-    """
-    # Extract parameters for the base environment
-    env_type = env_config_from_ray.get("env_type", "foraging")
-    n_agents = env_config_from_ray.get("n_agents", 5)
+def register_environments():
+    """Register all custom environments with Ray."""
+    # Register your environments here
+    register_env("CommEnv-v0", lambda config: CommunicationEnv(config))
+    # Add more environments as needed
+    # register_env("ForagingEnv-v0", lambda config: ForagingEnv(config))
+    # register_env("NavigationEnv-v0", lambda config: NavigationEnv(config))
 
-    # Create the base biologically-inspired environment from emergence_environments.py
-    base_env = create_emergence_environment(
-        env_type=env_type,
-        n_agents=n_agents,
-        grid_size=env_config_from_ray.get("grid_size", (30, 30)),
-        episode_length=env_config_from_ray.get("episode_length", 200),
-        communication_dim=env_config_from_ray.get("comm_dim", 8),
-        render_mode=env_config_from_ray.get("render_mode", None)
+
+def train(args: argparse.Namespace):
+    """Main training function."""
+
+    # Setup logging
+    logger = setup_logging(
+        log_level=args.log_level,
+        log_file=args.log_file
     )
 
-    # Wrap for PettingZoo compatibility
-    pz_env = ParallelPettingZooEnv(base_env)
+    # Initialize Ray
+    ray_init_config = {
+        "local_mode": args.debug,
+        "num_cpus": args.ray_num_cpus,
+        "num_gpus": args.ray_num_gpus,
+    }
 
-    # Apply the RewardEngineeringWrapper to inject communication events and shape rewards
-    # We select a reward preset based on the environment type for demonstration
-    if env_type == "foraging":
-        reward_engineer_instance = RewardPresets.ant_colony_foraging()['engineer']
-    elif env_type == "predator_prey":
-        reward_engineer_instance = RewardPresets.predator_prey_defense()['engineer']
-    else:
-        # Default reward engineer
-        reward_engineer_instance = RewardEngineer(env_type)
-        reward_engineer_instance.create_implicit_reward_structure("multi_principle")
+    if args.ray_address:
+        ray_init_config["address"] = args.ray_address
 
-    communication_analyzer_instance = CommunicationAnalyzer()
+    logger.info(f"Initializing Ray with config: {ray_init_config}")
+    ray.init(**ray_init_config)
 
-    wrapped_env = RewardEngineeringWrapper(
-        pz_env,
-        reward_engineer=reward_engineer_instance,
-        communication_analyzer=communication_analyzer_instance
-    )
-    return wrapped_env
+    # Register environments
+    register_environments()
 
+    # Create training configuration
+    logger.info(f"Loading experiment configuration: {args.experiment}")
 
-class UnifiedMARLTrainer:
-    """
-    Orchestrates the entire training pipeline from configuration to execution.
-    """
-    def __init__(self, args: argparse.Namespace):
-        self.args = args
-        self.training_config_factory = TrainingConfigFactory()
-        self.hardware_info = self.training_config_factory.hardware_info
+    # Override experiment config with CLI arguments
+    overrides = {}
+    if args.learning_rate is not None:
+        overrides["learning_rate"] = args.learning_rate
+    if args.train_batch_size is not None:
+        overrides["train_batch_size"] = args.train_batch_size
+    if args.num_workers is not None:
+        overrides["num_workers"] = args.num_workers
+    if args.num_gpus is not None:
+        overrides["num_gpus"] = args.num_gpus
+    if args.seed is not None:
+        overrides["seed"] = args.seed
 
-        # Setup output directories
-        self.results_base_dir = Path(args.output_dir)
-        self.results_base_dir.mkdir(parents=True, exist_ok=True)
-        self.exp_run_dir = self.results_base_dir / f"{args.env}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        self.exp_run_dir.mkdir(exist_ok=True)
-        print(f"📁 Experiment results will be saved to: {self.exp_run_dir}")
+    # Add callbacks
+    overrides["callbacks_class"] = BioInspiredCallbacks
 
-    def _get_ppo_config(self) -> PPOConfig:
-        """
-        Creates a hardware-optimized PPOConfig for the specified experiment.
-        """
-        # Create a dummy environment to inspect observation and action spaces
-        dummy_env = create_env_with_wrappers(self.args.env_config)
-        single_agent_obs_space = dummy_env.observation_space["agent_0"]
-        single_agent_action_space = dummy_env.action_space["agent_0"]
-        dummy_env.close()
+    # Create config
+    config = create_config_for_experiment(args.experiment, **overrides)
 
-        # Get the optimal configuration from the factory based on detected hardware
-        config = self.training_config_factory.create_config(
-            single_agent_obs_space,
-            single_agent_action_space,
-            force_mode=self.args.hardware
-        )
+    # Set up logging directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = Path(args.log_dir) / args.experiment / timestamp
+    log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Specify the RLModule with its custom configuration
-        rl_module_spec = SingleAgentRLModuleSpec(
-            module_class=NatureInspiredCommModule,
-            observation_space=single_agent_obs_space,
-            action_space=single_agent_action_space,
-            model_config_dict={
-                "num_agents": self.args.agents,
-                "embed_dim": 256,
-                "pheromone_dim": self.args.comm_dim,
-                "memory_dim": self.args.memory_dim,
-                "num_comm_rounds": self.args.comm_rounds,
-                "num_attention_heads": self.args.attention_heads,
-            }
-        )
-        config.rl_module(rl_module_spec=rl_module_spec)
+    # Save configuration
+    config_dict = config.to_dict()
+    with open(log_dir / "config.json", "w") as f:
+        json.dump(config_dict, f, indent=2)
 
-        # Set the environment creator function for Ray workers
-        config.environment(env="unified_marl_env", env_config=self.args.env_config)
+    logger.info(f"Logging to: {log_dir}")
 
-        # Configure multi-agent policies for parameter sharing
-        config.multi_agent(
-            policies={"shared_policy": (None, single_agent_obs_space, single_agent_action_space, {})},
-            policy_mapping_fn=lambda agent_id, episode, **kwargs: "shared_policy",
-        )
+    if args.tune:
+        # Hyperparameter tuning with Ray Tune
+        logger.info("Starting hyperparameter search with Ray Tune")
 
-        # Add our custom callbacks for tracking emergent communication
-        config.callbacks(RealEmergenceTrackingCallbacks)
+        # Define search space
+        tune_config = {
+            "learning_rate": tune.loguniform(1e-5, 1e-3),
+            "entropy_coeff": tune.uniform(0.0, 0.1),
+            "clip_param": tune.uniform(0.1, 0.3),
+            "train_batch_size": tune.choice([4000, 8000, 16000]),
+        }
 
-        return config
+        # Add bio-inspired hyperparameters
+        if EXPERIMENT_CONFIGS[args.experiment].get("use_plasticity", False):
+            tune_config["plasticity_rate"] = tune.loguniform(1e-4, 1e-2)
 
-    def run_training(self):
-        """
-        Initializes Ray, builds the algorithm, and executes the training loop.
-        """
-        print_hardware_summary()
+        if EXPERIMENT_CONFIGS[args.experiment].get("use_pheromones", False):
+            tune_config["pheromone_decay_rate"] = tune.uniform(0.9, 0.99)
 
-        # Initialize Ray
-        if ray.is_initialized():
-            ray.shutdown()
-
-        # NOTE: NVMe usage would be configured here if get_ray_init_kwargs supported it.
-        # For simplicity, we manage CPU/GPU resources.
-        ray.init(
-            num_gpus=1 if self.hardware_info.gpu_available and self.args.hardware == 'gpu' else 0,
-            num_cpus=self.hardware_info.cpu_cores_logical,
-            include_dashboard=False # Can be set to True for debugging
-        )
-        print(f"✅ Ray {ray.__version__} initialized successfully!")
-        print(f"📊 Ray Cluster Resources: {ray.cluster_resources()}")
-
-        # Register the environment creator with Ray Tune
-        register_env("unified_marl_env", create_env_with_wrappers)
-
-        # Get the full PPO configuration
-        ppo_config = self._get_ppo_config()
-
-        # Setup and run the Tuner
-        tuner = tune.Tuner(
-            "PPO",
-            param_space=ppo_config.to_dict(),
-            run_config=RunConfig(
-                name=f"EmergenceExp_{self.args.env}",
-                stop={"training_iteration": self.args.iterations},
-                checkpoint_config=tune.CheckpointConfig(
-                    checkpoint_frequency=self.args.checkpoint_freq,
-                    num_to_keep=3,
-                    checkpoint_at_end=True,
-                ),
-                failure_config=FailureConfig(max_failures=2),
-                local_dir=str(self.exp_run_dir)
+        # Run tuning
+        analysis = tune.run(
+            PPO,
+            config=config.to_dict(),
+            param_space=tune_config,
+            num_samples=args.num_samples,
+            stop={
+                "timesteps_total": EXPERIMENT_CONFIGS[args.experiment]["total_timesteps"],
+                "episode_reward_mean": args.target_reward,
+            },
+            checkpoint_freq=args.checkpoint_freq,
+            checkpoint_at_end=True,
+            local_dir=str(log_dir),
+            verbose=1 if not args.quiet else 0,
+            progress_reporter=tune.CLIReporter(
+                metric_columns=["episode_reward_mean", "timesteps_total"],
+                parameter_columns=list(tune_config.keys()),
             ),
         )
 
+        # Print results
+        best_trial = analysis.get_best_trial("episode_reward_mean", "max")
+        logger.info(f"\nBest trial config: {best_trial.config}")
+        logger.info(f"Best trial final reward: {best_trial.last_result['episode_reward_mean']}")
+
+        # Save best config
+        with open(log_dir / "best_config.json", "w") as f:
+            json.dump(best_trial.config, f, indent=2)
+
+    else:
+        # Single training run
+        logger.info("Starting single training run")
+
+        # Build algorithm
+        algo = config.build()
+
+        # Training loop
+        iteration = 0
         try:
-            print("\n📈 Training in progress...")
-            results = tuner.fit()
-            best_result = results.get_best_result()
+            while True:
+                # Train for one iteration
+                result = algo.train()
+                iteration += 1
 
-            print("\n" + "="*70)
-            print("🎉 Training Completed Successfully!")
-            print(f"   Best checkpoint saved in: {best_result.checkpoint}")
-            print(f"   Final episode reward mean: {best_result.metrics.get('episode_reward_mean', 'N/A'):.2f}")
+                # Log progress
+                if iteration % args.print_freq == 0:
+                    logger.info(f"\n{'='*60}")
+                    logger.info(f"Iteration: {iteration}")
+                    logger.info(f"Timesteps: {result['timesteps_total']:,}")
+                    logger.info(f"Episodes: {result['episodes_total']:,}")
+                    logger.info(f"Reward mean: {result['episode_reward_mean']:.3f}")
+                    logger.info(f"Reward min/max: {result['episode_reward_min']:.3f} / {result['episode_reward_max']:.3f}")
 
-            final_emergence_score = best_result.metrics.get('custom_metrics', {}).get('emergence_score_mean', 0.0)
-            print(f"   Final Emergence Score: {final_emergence_score:.3f}")
+                    # Log custom metrics
+                    if "custom_metrics" in result:
+                        logger.info("\nCustom Metrics:")
+                        for key, value in result["custom_metrics"].items():
+                            if isinstance(value, (int, float)):
+                                logger.info(f"  {key}: {value:.4f}")
 
-        except TuneError as e:
-            print(f"\n❌ Ray Tune error during training: {e}")
-            traceback.print_exc()
-        except Exception as e:
-            print(f"\n❌ An unexpected error occurred during training: {e}")
-            traceback.print_exc()
+                    # Log bio-inspired metrics if available
+                    if "bio_inspired" in result:
+                        logger.info("\nBio-Inspired Metrics:")
+                        for key, value in result["bio_inspired"].items():
+                            logger.info(f"  {key}: {value:.4f}")
+
+                # Save checkpoint
+                if iteration % args.checkpoint_freq == 0:
+                    checkpoint_dir = algo.save(str(log_dir / "checkpoints"))
+                    logger.info(f"Checkpoint saved: {checkpoint_dir}")
+
+                # Check stopping conditions
+                if result["timesteps_total"] >= EXPERIMENT_CONFIGS[args.experiment]["total_timesteps"]:
+                    logger.info(f"\nReached target timesteps. Training complete!")
+                    break
+
+                if args.target_reward and result["episode_reward_mean"] >= args.target_reward:
+                    logger.info(f"\nReached target reward. Training complete!")
+                    break
+
+                if args.max_iterations and iteration >= args.max_iterations:
+                    logger.info(f"\nReached max iterations. Training complete!")
+                    break
+
+        except KeyboardInterrupt:
+            logger.info("\nTraining interrupted by user")
+
         finally:
-            ray.shutdown()
-            print("✅ Ray shutdown complete.")
+            # Save final checkpoint
+            final_checkpoint = algo.save(str(log_dir / "final_model"))
+            logger.info(f"Final model saved: {final_checkpoint}")
 
-    def run(self):
-        """Main entry point to start the experiment."""
-        if self.args.test_only:
-            self._run_tests()
-        else:
-            self.run_training()
+            # Save training history
+            with open(log_dir / "training_history.json", "w") as f:
+                json.dump({"iterations": iteration}, f)
 
-    def _run_tests(self):
-        """Placeholder for running comprehensive system tests."""
-        print("\n🧪 Running comprehensive system tests...")
-        # In a full implementation, you would import and run test functions
-        # from a dedicated testing module.
-        print("✅ Environment Creation Test: OK")
-        print("✅ Config Generation Test: OK")
-        print("✅ All system tests passed!")
-        sys.exit(0)
+            # Cleanup
+            algo.stop()
 
-def parse_arguments():
-    """Parse all command-line arguments for the unified trainer."""
-    parser = argparse.ArgumentParser(
-        description="Unified Trainer for Nature-Inspired Multi-Agent Reinforcement Learning",
-        formatter_class=argparse.RawTextHelpFormatter,
-        epilog="""
-Examples:
-  # Run a default foraging experiment with auto-detected hardware
-  python main_trainer.py --env foraging --agents 8 --iterations 100
+    ray.shutdown()
+    logger.info("Training completed successfully!")
 
-  # Force GPU mode for a predator-prey experiment
-  python main_trainer.py --hardware gpu --env predator_prey --iterations 200
 
-  # Run system tests only
-  python main_trainer.py --test-only
-        """
-    )
+def evaluate(args: argparse.Namespace):
+    """Evaluate a trained model."""
 
-    # --- Hardware & Execution Arguments ---
-    parser.add_argument(
-        "--hardware",
-        choices=["auto", "gpu", "cpu"],
-        default="auto",
-        help="Force hardware mode. 'auto' detects the best available option."
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="marl_results",
-        help="Base directory for saving results and checkpoints."
-    )
-    parser.add_argument(
-        "--test-only",
-        action="store_true",
-        help="Run system tests and exit without training."
-    )
+    logger = setup_logging(log_level=args.log_level)
 
-    # --- Training Arguments ---
-    parser.add_argument(
-        "--iterations",
-        type=int,
-        default=100,
-        help="Total number of training iterations to run."
-    )
-    parser.add_argument(
-        "--checkpoint-freq",
-        type=int,
-        default=25,
-        help="Save a checkpoint every N iterations."
-    )
+    # Initialize Ray
+    ray.init(local_mode=True)
+    register_environments()
 
-    # --- Environment Arguments ---
-    parser.add_argument(
-        "--env",
-        type=str,
-        default="foraging",
-        choices=["foraging", "predator_prey", "temporal_coordination", "information_asymmetry"],
-        help="The type of emergence environment to use."
-    )
-    parser.add_argument(
-        "--agents",
-        type=int,
-        default=8,
-        help="Number of agents in the environment."
-    )
-    parser.add_argument(
-        "--grid-size",
-        type=int,
-        nargs=2,
-        default=[30, 30],
-        help="Size of the environment grid (e.g., --grid-size 25 25)."
-    )
-    parser.add_argument(
-        "--episode-length",
-        type=int,
-        default=200,
-        help="Maximum number of steps per episode."
-    )
+    # Load configuration from checkpoint directory
+    checkpoint_path = Path(args.checkpoint_path)
+    config_path = checkpoint_path.parent.parent / "config.json"
 
-    # --- Model & Communication Arguments ---
-    parser.add_argument(
-        "--comm-dim",
-        type=int,
-        default=16,
-        help="Dimension of the agent's communication signal (pheromone vector)."
-    )
-    parser.add_argument(
-        "--memory-dim",
-        type=int,
-        default=64,
-        help="Dimension of the agent's neural plasticity memory (GRU hidden state)."
-    )
-    parser.add_argument(
-        "--comm-rounds",
-        type=int,
-        default=3,
-        help="Number of communication rounds in the attention network."
-    )
-    parser.add_argument(
-        "--attention-heads",
-        type=int,
-        default=8,
-        help="Number of heads in the multi-head attention communication module."
-    )
+    if config_path.exists():
+        with open(config_path, "r") as f:
+            saved_config = json.load(f)
+        logger.info(f"Loaded config from: {config_path}")
+    else:
+        logger.warning("No saved config found, using default experiment config")
+        saved_config = create_config_for_experiment(args.experiment).to_dict()
 
-    return parser.parse_args()
+    # Create config for evaluation
+    config = PPO.from_dict(saved_config)
+    config.rollouts(num_rollout_workers=0)  # No workers for evaluation
+    config.explore = False  # Disable exploration
+
+    # Build and restore
+    algo = config.build()
+    algo.restore(str(checkpoint_path))
+
+    # Create environment
+    env_config = saved_config.get("env_config", {})
+    env = CommunicationEnv(env_config)  # Adjust based on your environment
+
+    # Run evaluation episodes
+    episode_rewards = []
+    episode_lengths = []
+    custom_metrics = {}
+
+    for episode in range(args.num_eval_episodes):
+        obs, info = env.reset()
+        done = {"__all__": False}
+        episode_reward = 0
+        episode_length = 0
+
+        while not done["__all__"]:
+            actions = {}
+
+            # Get actions for all agents
+            for agent_id, agent_obs in obs.items():
+                policy_id = algo.config.policy_mapping_fn(agent_id, None, None)
+                action = algo.compute_single_action(
+                    agent_obs,
+                    policy_id=policy_id,
+                    explore=False
+                )
+                actions[agent_id] = action
+
+            # Step environment
+            obs, rewards, terminateds, truncateds, infos = env.step(actions)
+            done = {"__all__": terminateds.get("__all__", False) or truncateds.get("__all__", False)}
+
+            episode_reward += sum(rewards.values())
+            episode_length += 1
+
+            # Collect custom metrics
+            for agent_id, info in infos.items():
+                for key, value in info.items():
+                    if key not in custom_metrics:
+                        custom_metrics[key] = []
+                    custom_metrics[key].append(value)
+
+        episode_rewards.append(episode_reward)
+        episode_lengths.append(episode_length)
+
+        if (episode + 1) % 10 == 0:
+            logger.info(f"Evaluated {episode + 1}/{args.num_eval_episodes} episodes")
+
+    # Print evaluation results
+    logger.info(f"\n{'='*60}")
+    logger.info("Evaluation Results:")
+    logger.info(f"Episodes: {args.num_eval_episodes}")
+    logger.info(f"Average Reward: {sum(episode_rewards) / len(episode_rewards):.3f}")
+    logger.info(f"Std Reward: {torch.tensor(episode_rewards).std():.3f}")
+    logger.info(f"Min/Max Reward: {min(episode_rewards):.3f} / {max(episode_rewards):.3f}")
+    logger.info(f"Average Length: {sum(episode_lengths) / len(episode_lengths):.1f}")
+
+    # Print custom metrics
+    if custom_metrics:
+        logger.info("\nCustom Metrics:")
+        for key, values in custom_metrics.items():
+            if all(isinstance(v, (int, float)) for v in values):
+                avg_value = sum(values) / len(values)
+                logger.info(f"  {key}: {avg_value:.4f}")
+
+    ray.shutdown()
+
+
+def analyze(args: argparse.Namespace):
+    """Analyze training results and create visualizations."""
+    from analysis.analysis_visualization import create_training_plots
+
+    logger = setup_logging(log_level=args.log_level)
+
+    # Find all experiments in log directory
+    log_dir = Path(args.log_dir)
+    experiments = [d for d in log_dir.iterdir() if d.is_dir()]
+
+    logger.info(f"Found {len(experiments)} experiments in {log_dir}")
+
+    # Create analysis for each experiment
+    for exp_dir in experiments:
+        logger.info(f"\nAnalyzing: {exp_dir.name}")
+
+        # Find all runs for this experiment
+        runs = [d for d in exp_dir.iterdir() if d.is_dir()]
+
+        for run_dir in runs:
+            # Check if this is a training run
+            progress_file = run_dir / "progress.csv"
+            if progress_file.exists():
+                logger.info(f"  Creating plots for: {run_dir.name}")
+
+                # Create visualization
+                output_dir = run_dir / "analysis"
+                output_dir.mkdir(exist_ok=True)
+
+                create_training_plots(
+                    progress_file,
+                    output_dir,
+                    experiment_name=exp_dir.name
+                )
+
+    logger.info("\nAnalysis complete!")
+
 
 def main():
-    """Main function to parse args and run the trainer."""
-    args = parse_arguments()
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Bio-inspired Multi-Agent RL Training System",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
 
-    # Construct the env_config dictionary from parsed arguments
-    args.env_config = {
-        "env_type": args.env,
-        "n_agents": args.agents,
-        "grid_size": tuple(args.grid_size),
-        "episode_length": args.episode_length,
-        "comm_dim": args.comm_dim,
-        "render_mode": None # Rendering is off for training runs
-    }
+    # Global arguments
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level"
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Log to file (in addition to console)"
+    )
 
-    trainer = UnifiedMARLTrainer(args)
-    trainer.run()
+    # Subcommands
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+
+    # List experiments command
+    list_parser = subparsers.add_parser("list", help="List available experiments")
+
+    # Train command
+    train_parser = subparsers.add_parser("train", help="Train a model")
+    train_parser.add_argument(
+        "experiment",
+        type=str,
+        choices=list(EXPERIMENT_CONFIGS.keys()),
+        help="Experiment configuration to use"
+    )
+    train_parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Override number of workers"
+    )
+    train_parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=None,
+        help="Override number of GPUs"
+    )
+    train_parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+        help="Override learning rate"
+    )
+    train_parser.add_argument(
+        "--train-batch-size",
+        type=int,
+        default=None,
+        help="Override training batch size"
+    )
+    train_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override random seed"
+    )
+    train_parser.add_argument(
+        "--checkpoint-freq",
+        type=int,
+        default=50,
+        help="Checkpoint frequency (iterations)"
+    )
+    train_parser.add_argument(
+        "--print-freq",
+        type=int,
+        default=10,
+        help="Print frequency (iterations)"
+    )
+    train_parser.add_argument(
+        "--log-dir",
+        type=str,
+        default="./results",
+        help="Directory for logs and checkpoints"
+    )
+    train_parser.add_argument(
+        "--tune",
+        action="store_true",
+        help="Use Ray Tune for hyperparameter search"
+    )
+    train_parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=10,
+        help="Number of trials for Ray Tune"
+    )
+    train_parser.add_argument(
+        "--target-reward",
+        type=float,
+        default=None,
+        help="Stop training when this reward is reached"
+    )
+    train_parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Maximum training iterations"
+    )
+    train_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Run in debug mode (local Ray)"
+    )
+    train_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Minimal output"
+    )
+    train_parser.add_argument(
+        "--ray-address",
+        type=str,
+        default=None,
+        help="Ray cluster address"
+    )
+    train_parser.add_argument(
+        "--ray-num-cpus",
+        type=int,
+        default=None,
+        help="Number of CPUs for Ray"
+    )
+    train_parser.add_argument(
+        "--ray-num-gpus",
+        type=int,
+        default=None,
+        help="Number of GPUs for Ray"
+    )
+
+    # Evaluate command
+    eval_parser = subparsers.add_parser("evaluate", help="Evaluate a model")
+    eval_parser.add_argument(
+        "checkpoint_path",
+        type=str,
+        help="Path to model checkpoint"
+    )
+    eval_parser.add_argument(
+        "--experiment",
+        type=str,
+        default="baseline",
+        help="Experiment configuration (if config.json not found)"
+    )
+    eval_parser.add_argument(
+        "--num-eval-episodes",
+        type=int,
+        default=100,
+        help="Number of evaluation episodes"
+    )
+
+    # Analyze command
+    analyze_parser = subparsers.add_parser("analyze", help="Analyze training results")
+    analyze_parser.add_argument(
+        "--log-dir",
+        type=str,
+        default="./results",
+        help="Directory containing training logs"
+    )
+
+    args = parser.parse_args()
+
+    # Print system info
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"CUDA device: {torch.cuda.get_device_name(0)}")
+    print()
+
+    # Execute command
+    if args.command == "list":
+        list_experiments()
+    elif args.command == "train":
+        train(args)
+    elif args.command == "evaluate":
+        evaluate(args)
+    elif args.command == "analyze":
+        analyze(args)
+    else:
+        parser.print_help()
+
 
 if __name__ == "__main__":
     main()
