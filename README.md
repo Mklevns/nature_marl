@@ -6,7 +6,7 @@ The core of this framework is to create environmental pressures that necessitate
 
 -----
 
-## 核心功能
+## Core Features
 
   * **🧬 Biologically-Inspired Environments**: Custom multi-agent environments designed to simulate natural challenges that drive communication. These are compatible with the PettingZoo API and include scenarios like resource scarcity (Foraging) and threat avoidance (Predator-Prey).
   * **🧠 Advanced Communication Models**: The agent's "brain" is a custom `RLModule` called `NatureInspiredCommModule`. It goes beyond simple message passing, incorporating:
@@ -22,7 +22,7 @@ The core of this framework is to create environmental pressures that necessitate
 
 -----
 
-## 核心理念
+## Core Concept
 
 This project is built on foundational concepts in multi-agent reinforcement learning.
 
