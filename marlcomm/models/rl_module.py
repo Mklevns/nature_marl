@@ -1,4 +1,6 @@
-# File: nature_marl/core/production_bio_inspired_rl_module.py
+# File: nature_marl/models/rl_module.py
+# -*- coding: utf-8 -*-
+# File: mklevns/nature_marl/nature_marl-920733f493b041af95691f2bb1a5334e27d91026/marlcomm/models/rl_module.py
 """
 Production-Ready Bio-Inspired Multi-Agent RL Module (Phase 3: Code Quality & Testing)
 
@@ -26,6 +28,7 @@ from ray.rllib.utils.typing import TensorType
 from ray.rllib.utils.annotations import override
 
 # Conditional imports for type checking
+from ray.rllib.core.rl_module.rl_module import RLModuleConfig # Import RLModuleConfig for type hinting
 if TYPE_CHECKING:
     from ray.rllib.core.rl_module.rl_module import SingleAgentRLModuleSpec
 
@@ -118,7 +121,7 @@ class ProductionPheromoneAttentionNetwork(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim, hidden_dim // 2), # Corrected: Ensure consistent dimension
             nn.ReLU(),
             nn.Linear(hidden_dim // 2, hidden_dim),
             nn.Tanh()  # Bounded chemical concentrations
@@ -201,9 +204,9 @@ class ProductionPheromoneAttentionNetwork(nn.Module):
 
         if self.debug_mode:
             pheromone_stats = {
-                "mean": pheromone_signals.mean().item(),
-                "std": pheromone_signals.std().item(),
-                "gating_ratio": neighborhood_weights.mean().item()
+                "mean": pheromone_signals.detach().mean().item(),
+                "std": pheromone_signals.detach().std().item(),
+                "gating_ratio": neighborhood_weights.detach().mean().item()
             }
             logger.debug(f"Pheromone statistics: {pheromone_stats}")
 
@@ -225,7 +228,7 @@ class ProductionPheromoneAttentionNetwork(nn.Module):
         output = self.layer_norm(enhanced_features + attended_features)
 
         if self.debug_mode and attention_weights is not None:
-            attn_entropy = -torch.sum(attention_weights * torch.log(attention_weights + 1e-8)).item()
+            attn_entropy = -torch.sum(attention_weights.detach() * torch.log(attention_weights.detach() + 1e-8)).item()
             logger.debug(f"Attention entropy: {attn_entropy:.4f}")
 
         return output, pheromone_signals, attention_weights
@@ -403,11 +406,11 @@ class ProductionNeuralPlasticityMemory(nn.Module):
         updated_memory = (1 - adaptive_rate) * hidden_state + adaptive_rate * new_memory
 
         if self.debug_mode:
-            memory_change = torch.norm(updated_memory - hidden_state).item()
+            memory_change = torch.norm(updated_memory.detach() - hidden_state.detach()).item()
             plasticity_stats = {
                 "memory_change": memory_change,
-                "avg_plasticity": adaptive_rate.mean().item(),
-                "max_plasticity": adaptive_rate.max().item()
+                "avg_plasticity": adaptive_rate.detach().mean().item(),
+                "max_plasticity": adaptive_rate.detach().max().item()
             }
             logger.debug(f"Memory update statistics: {plasticity_stats}")
 
@@ -541,25 +544,33 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
 
     Example:
         >>> from gymnasium.spaces import Box, MultiDiscrete
+        >>> from ray.rllib.algorithms.ppo import PPOConfig
         >>>
         >>> obs_space = Box(low=-1, high=1, shape=(4,))
         >>> act_space = MultiDiscrete([3, 2, 4])
         >>>
-        >>> module = ProductionUnifiedBioInspiredRLModule(
-        ...     observation_space=obs_space,
-        ...     action_space=act_space,
+        >>> # Correct RLlib v2 instantiation flow:
+        >>> module_spec = create_production_bio_module_spec(
+        ...     obs_space=obs_space,
+        ...     act_space=act_space,
+        ...     num_agents=8,
+        ...     use_communication=True,
         ...     model_config={
-        ...         "num_agents": 8,
-        ...         "use_communication": True,
         ...         "debug_mode": True,
         ...         "hidden_dim": 256,
         ...         "memory_dim": 64
         ...     }
         ... )
-        >>> module.setup()
         >>>
-        >>> # Training forward pass
-        >>> batch = {"obs": torch.randn(16, 4)}  # 8 agents * 2 batch
+        >>> # You would typically pass this spec to an AlgorithmConfig
+        >>> # config = PPOConfig().rl_module(rl_module_spec=module_spec).environment(...)
+        >>> # algo = config.build()
+        >>>
+        >>> # For direct testing, build the module manually:
+        >>> module = module_spec.build()
+        >>>
+        >>> # Training forward pass (example batch)
+        >>> batch = {"obs": torch.randn(16, 4)}  # Example batch assuming 2 envs * 8 agents
         >>> output = module.forward_train(batch)
         >>>
         >>> # Access bio-inspired metrics
@@ -569,43 +580,35 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
 
     def __init__(
         self,
-        config: Optional[Dict[str, Any]] = None,
+        config: RLModuleConfig, # Changed type hint to RLModuleConfig (removed quotes due to direct import)
         **kwargs
     ) -> None:
         """
         Initialize the production bio-inspired RL module.
 
         Args:
-            config: Configuration dictionary containing:
+            config: RLModuleConfig object containing:
                 - observation_space: Single agent observation space
                 - action_space: Single agent action space
                 - model_config: Model configuration dictionary
             **kwargs: Additional RLModule parameters
         """
-        # Extract components from config
-        if config is None:
-            config = {}
-
-        # RLlib 2.9.x passes spaces through config
-        observation_space = config.get("observation_space")
-        action_space = config.get("action_space")
-        model_config = config.get("model_config", {})
-
-        # Store for later use
-        self.observation_space = observation_space
-        self.action_space = action_space
-        self.model_config = model_config
-
-        # Call parent init with config
-        super().__init__(config=config, **kwargs)
-
-        # Configure logging level based on debug mode
+        # Initialize debug_mode first as it's used by setup() called in super().__init__()
+        self.model_config = config.model_config_dict # Access model_config_dict
         self.debug_mode = self.model_config.get("debug_mode", False)
         if self.debug_mode:
             logger.setLevel(logging.DEBUG)
             logger.info("Debug mode enabled - detailed logging active")
         else:
             logger.setLevel(logging.INFO)
+
+        # Extract other components from RLModuleConfig object after debug_mode is set
+        # Access properties directly from the config object
+        self.observation_space = config.observation_space
+        self.action_space = config.action_space
+
+        # Call parent init with config
+        super().__init__(config=config, **kwargs) # Pass the original config object
 
     @override(TorchRLModule)
     def setup(self) -> None:
@@ -627,19 +630,20 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
                    f"hidden_dim={self.hidden_dim}, memory_dim={self.memory_dim}")
 
         # Calculate observation input dimension
+        # For a shared policy, the input to the RLModule is already batched by agent.
+        # So, the input dimension is just the flattened single agent observation space.
         obs_input_dim = self._calculate_obs_input_dim()
-        if self.model_config.get("shared_policy", True):
-            obs_input_dim *= self.num_agents
-            logger.info(f"Using shared policy: effective input dim = {obs_input_dim}")
 
         # Build sensory processing network
+        sensory_l1_dim = self._validate_config_param("sensory_l1_dim", 512, int, lambda x: x > 0)
+        sensory_dropout = self._validate_config_param("sensory_dropout", 0.1, float, lambda x: 0.0 <= x <= 1.0)
         self.sensory_encoder = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(obs_input_dim, 512),
-            nn.LayerNorm(512),
+            nn.Linear(obs_input_dim, sensory_l1_dim),
+            nn.LayerNorm(sensory_l1_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, self.hidden_dim),
+            nn.Dropout(sensory_dropout),
+            nn.Linear(sensory_l1_dim, self.hidden_dim),
             nn.LayerNorm(self.hidden_dim),
             nn.ReLU()
         )
@@ -650,8 +654,8 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
             self.comm_layers = nn.ModuleList([
                 ProductionPheromoneAttentionNetwork(
                     hidden_dim=self.hidden_dim,
-                    num_heads=8,
-                    dropout=0.1,
+                    num_heads=self.model_config.get("comm_num_heads", 8),
+                    dropout=self.model_config.get("comm_dropout", 0.1),
                     use_positional_encoding=self.use_positional_encoding,
                     max_agents=self.num_agents,
                     debug_mode=self.debug_mode
@@ -686,14 +690,17 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
         )
 
         # Value network
+        value_l1_dim = self._validate_config_param("value_l1_dim", 256, int, lambda x: x > 0)
+        value_l2_dim = self._validate_config_param("value_l2_dim", 128, int, lambda x: x > 0)
+        value_dropout = self._validate_config_param("value_dropout", 0.1, float, lambda x: 0.0 <= x <= 1.0)
         self.value_net = nn.Sequential(
-            nn.Linear(decision_input_dim, 256),
-            nn.LayerNorm(256),
+            nn.Linear(decision_input_dim, value_l1_dim),
+            nn.LayerNorm(value_l1_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, 128),
+            nn.Dropout(value_dropout),
+            nn.Linear(value_l1_dim, value_l2_dim),
             nn.ReLU(),
-            nn.Linear(128, 1)
+            nn.Linear(value_l2_dim, 1)
         )
         logger.info("Built policy and value networks")
 
@@ -813,8 +820,11 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
         if self.debug_mode:
             logger.debug(f"Forward pass: batch_size={batch_size}, obs_shape={obs.shape}")
 
-        # Encode observations
+        # Encode observations (handle discrete spaces)
         obs = self._encode_observations(obs)
+
+        # Flatten the observation tensor before passing to the sensory encoder
+        obs = obs.flatten(1) # Flatten starting from dimension 1 (keeping batch dim)
 
         # Initialize state
         hidden_state = self._validate_and_init_state(state_in, batch_size, device)
@@ -834,15 +844,18 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
 
         if self.use_communication and self.num_agents > 1:
             # Reshape for multi-agent processing
-            try:
-                agent_features = sensory_features.view(
-                    batch_size // self.num_agents,
-                    self.num_agents,
-                    self.hidden_dim
+            # Ensure batch size is divisible by number of agents
+            if batch_size % self.num_agents != 0:
+                raise ValueError(
+                    f"Batch size {batch_size} not divisible by num_agents {self.num_agents}. "
+                    "This indicates an issue with multi-agent batching or environment setup. "
+                    "Ensure num_envs_per_env_runner * rollout_fragment_length is divisible by num_agents."
                 )
-            except RuntimeError as e:
-                logger.error(f"Communication reshaping failed: {e}")
-                raise
+            agent_features = sensory_features.view(
+                batch_size // self.num_agents,
+                self.num_agents,
+                self.hidden_dim
+            )
 
             # Multi-round communication with monitoring
             for round_idx, comm_layer in enumerate(self.comm_layers):
@@ -895,17 +908,17 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
 
         # Add bio-inspired metrics
         if final_comm_signal is not None:
-            output["comm_signal"] = final_comm_signal
-            output["comm_entropy"] = comm_entropy
-            output["comm_sparsity"] = comm_sparsity
+            output["comm_signal"] = final_comm_signal.detach()
+            output["comm_entropy"] = comm_entropy.detach()
+            output["comm_sparsity"] = comm_sparsity.detach()
 
             if all_attention_weights:
-                output["attention_weights"] = all_attention_weights
+                output["attention_weights"] = torch.stack(all_attention_weights, dim=1)
 
                 # Compute attention statistics
                 avg_attention = torch.stack(all_attention_weights).mean(dim=0)
                 attention_entropy = -torch.sum(
-                    avg_attention * torch.log(avg_attention + 1e-8),
+                    avg_attention.detach() * torch.log(avg_attention.detach() + 1e-8),
                     dim=-1
                 ).mean()
                 output["attention_entropy"] = attention_entropy
@@ -932,10 +945,10 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
         if self.debug_mode:
             logger.debug("Forward pass: training mode")
 
-        state_in = kwargs.get("state_in", None)
-        seq_lens = kwargs.get("seq_lens", None)
+        _state_in = kwargs.pop("state_in", None)
+        _seq_lens = kwargs.pop("seq_lens", None)
 
-        output, state_out = self._forward_core(batch, state_in, seq_lens, **kwargs)
+        output, state_out = self._forward_core(batch, _state_in, _seq_lens, **kwargs)
         output["state_out"] = state_out
 
         return output
@@ -950,10 +963,10 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
         if self.debug_mode:
             logger.debug("Forward pass: exploration mode")
 
-        state_in = kwargs.get("state_in", None)
-        seq_lens = kwargs.get("seq_lens", None)
+        _state_in = kwargs.pop("state_in", None)
+        _seq_lens = kwargs.pop("seq_lens", None)
 
-        output, state_out = self._forward_core(batch, state_in, seq_lens, **kwargs)
+        output, state_out = self._forward_core(batch, _state_in, _seq_lens, **kwargs)
         output["state_out"] = state_out
 
         return output
@@ -965,10 +978,12 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
         **kwargs
     ) -> Dict[str, TensorType]:
         """Forward pass during inference/evaluation."""
-        state_in = kwargs.get("state_in", None)
-        seq_lens = kwargs.get("seq_lens", None)
+        # No debug message for inference as it's typically verbose for deployments.
 
-        output, state_out = self._forward_core(batch, state_in, seq_lens, **kwargs)
+        _state_in = kwargs.pop("state_in", None)
+        _seq_lens = kwargs.pop("seq_lens", None)
+
+        output, state_out = self._forward_core(batch, _state_in, _seq_lens, **kwargs)
         output["state_out"] = state_out
 
         return output
@@ -976,7 +991,8 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
     @override(TorchRLModule)
     def get_initial_state(self) -> Dict[str, TensorType]:
         """Get initial state for recurrent processing."""
-        return {"hidden_state": torch.zeros(1, self.memory_dim)}
+        device = next(self.parameters()).device
+        return {"hidden_state": torch.zeros(1, self.memory_dim, device=device)}
 
     @override(TorchRLModule)
     def is_stateful(self) -> bool:
@@ -1036,6 +1052,7 @@ def create_production_bio_module_spec(
 
     Example:
         >>> from gymnasium.spaces import Box, MultiDiscrete
+        >>> from ray.rllib.algorithms.ppo import PPOConfig
         >>>
         >>> # Define spaces
         >>> obs_space = Box(low=-1, high=1, shape=(10,))
@@ -1060,13 +1077,19 @@ def create_production_bio_module_spec(
         ... )
         >>>
         >>> # Use in PPO configuration
-        >>> from ray.rllib.algorithms.ppo import PPOConfig
-        >>> config = (
-        ...     PPOConfig()
-        ...     .environment("your_environment")
-        ...     .rl_module(rl_module_spec=module_spec)
-        ...     .training(train_batch_size_per_learner=512)
-        ... )
+        >>> # config = PPOConfig().rl_module(rl_module_spec=module_spec).environment(...)
+        >>> # algo = config.build()
+        >>>
+        >>> # For direct testing, build the module manually:
+        >>> module = module_spec.build()
+        >>>
+        >>> # Training forward pass (example batch)
+        >>> batch = {"obs": torch.randn(16, 4)}  # Example batch assuming 2 envs * 8 agents
+        >>> output = module.forward_train(batch)
+        >>>
+        >>> # Access bio-inspired metrics
+        >>> comm_entropy = output.get("comm_entropy", 0.0)
+        >>> attention_weights = output.get("attention_weights", [])
 
     Configuration Parameters:
         - hidden_dim (int): Hidden layer dimension (default: 256)
@@ -1077,7 +1100,13 @@ def create_production_bio_module_spec(
         - use_positional_encoding (bool): Enable spatial encoding (default: True)
         - adaptive_plasticity (bool): Enable adaptive plasticity (default: True)
         - debug_mode (bool): Enable detailed logging (default: False)
-        - shared_policy (bool): Use shared policy across agents (default: True)
+        - comm_num_heads (int): Number of attention heads for communication (default: 8)
+        - comm_dropout (float): Dropout rate for communication layers (default: 0.1)
+        - sensory_l1_dim (int): Dimension of the first layer in sensory encoder (default: 512)
+        - sensory_dropout (float): Dropout rate in sensory encoder (default: 0.1)
+        - value_l1_dim (int): Dimension of the first layer in value network (default: 256)
+        - value_l2_dim (int): Dimension of the second layer in value network (default: 128)
+        - value_dropout (float): Dropout rate in value network (default: 0.1)
 
     Raises:
         ValueError: If num_agents <= 0 or invalid action/observation spaces
@@ -1108,7 +1137,6 @@ def create_production_bio_module_spec(
     config.update({
         "num_agents": num_agents,
         "use_communication": use_communication,
-        "shared_policy": True,  # Standard for multi-agent setups
     })
 
     # Set defaults for optional parameters if not provided
@@ -1120,13 +1148,20 @@ def create_production_bio_module_spec(
     config.setdefault("use_positional_encoding", True)
     config.setdefault("adaptive_plasticity", True)
     config.setdefault("debug_mode", False)
+    config.setdefault("comm_num_heads", 8)
+    config.setdefault("comm_dropout", 0.1)
+    config.setdefault("sensory_l1_dim", 512)
+    config.setdefault("sensory_dropout", 0.1)
+    config.setdefault("value_l1_dim", 256)
+    config.setdefault("value_l2_dim", 128)
+    config.setdefault("value_dropout", 0.1)
 
     # Log configuration
-    logger.info(f"Creating production bio-inspired module spec:")
-    logger.info(f"  Agents: {num_agents}, Communication: {use_communication}")
-    logger.info(f"  Hidden dim: {config['hidden_dim']}, Memory dim: {config['memory_dim']}")
-    logger.info(f"  Observation space: {type(obs_space).__name__}")
-    logger.info(f"  Action space: {type(act_space).__name__}")
+    logger.info("Creating production bio-inspired module spec:")
+    logger.info("  Agents: %s, Communication: %s" % (num_agents, use_communication))
+    logger.info("  Hidden dim: %s, Memory dim: %s" % (config['hidden_dim'], config['memory_dim']))
+    logger.info("  Observation space: %s" % type(obs_space).__name__)
+    logger.info("  Action space: %s" % type(act_space).__name__)
 
     return SingleAgentRLModuleSpec(
         module_class=ProductionUnifiedBioInspiredRLModule,
