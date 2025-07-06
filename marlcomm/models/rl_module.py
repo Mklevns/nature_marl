@@ -1,6 +1,4 @@
-# File: nature_marl/rl_module.py
-#!/usr/bin/env python3
-
+# File: nature_marl/core/production_bio_inspired_rl_module.py
 """
 Production-Ready Bio-Inspired Multi-Agent RL Module (Phase 3: Code Quality & Testing)
 
@@ -917,7 +915,7 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
         return output, state_out
 
     @override(TorchRLModule)
-    def forward_train(
+    def _forward_train(
         self,
         batch: Dict[str, TensorType],
         **kwargs
@@ -935,7 +933,7 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
         return output
 
     @override(TorchRLModule)
-    def forward_exploration(
+    def _forward_exploration(
         self,
         batch: Dict[str, TensorType],
         **kwargs
@@ -953,7 +951,7 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
         return output
 
     @override(TorchRLModule)
-    def forward_inference(
+    def _forward_inference(
         self,
         batch: Dict[str, TensorType],
         **kwargs
