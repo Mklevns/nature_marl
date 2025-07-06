@@ -172,11 +172,11 @@ def create_bio_inspired_ppo_config(
                 module_specs={
                     "speaker": SingleAgentRLModuleSpec(
                         module_class=BioInspiredRLModule,
-                        model_config=speaker_model_config,
+                        model_config_dict=speaker_model_config,
                     ),
                     "listener": SingleAgentRLModuleSpec(
                         module_class=BioInspiredRLModule,
-                        model_config=listener_model_config,
+                        model_config_dict=listener_model_config,
                     ),
                 }
             ),
@@ -186,7 +186,7 @@ def create_bio_inspired_ppo_config(
         config = config.rl_module(
             rl_module_spec=SingleAgentRLModuleSpec(
                 module_class=BioInspiredRLModule,
-                model_config={
+                model_config_dict={
                     "is_speaker": exp_config.get("is_speaker", True),
                     "comm_channel_dim": comm_channel_dim,
                     "use_pheromones": use_pheromones,
