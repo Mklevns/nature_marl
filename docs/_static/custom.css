@@ -1,0 +1,90 @@
+/* File: docs/_static/custom.css */
+/* Custom CSS for Nature MARL documentation */
+
+/* Bio-inspired color scheme */
+:root {
+    --bio-green: #2d5a27;
+    --bio-orange: #d4771b;
+    --bio-blue: #1e4d6b;
+    --bio-yellow: #f4d03f;
+}
+
+/* Custom styling for bio-inspired elements */
+.bio-concept {
+    background: linear-gradient(135deg, #e8f5e8 0%, #f0f8f0 100%);
+    border-left: 4px solid var(--bio-green);
+    padding: 15px;
+    margin: 20px 0;
+    border-radius: 5px;
+}
+
+.bio-concept h4 {
+    color: var(--bio-green);
+    margin-top: 0;
+}
+
+/* Highlight bio-inspired code */
+.highlight-bio {
+    background: #f8fdf8;
+    border: 1px solid #c3e6c3;
+}
+
+/* Custom admonitions for bio concepts */
+.admonition.bio-inspiration {
+    background-color: #e8f5e8;
+    border-color: var(--bio-green);
+}
+
+.admonition.bio-inspiration .admonition-title {
+    background-color: var(--bio-green);
+    color: white;
+}
+
+/* Performance metrics styling */
+.performance-metric {
+    display: inline-block;
+    background: var(--bio-blue);
+    color: white;
+    padding: 5px 10px;
+    margin: 5px;
+    border-radius: 15px;
+    font-size: 0.9em;
+}
+
+/* Logo and branding */
+.wy-side-nav-search {
+    background: linear-gradient(135deg, var(--bio-green) 0%, var(--bio-blue) 100%);
+}
+
+/* Code block improvements */
+.rst-content .highlight {
+    margin: 20px 0;
+}
+
+.rst-content .highlight pre {
+    padding: 15px;
+    border-radius: 5px;
+}
+
+/* Table styling for performance benchmarks */
+.rst-content table.docutils {
+    border-collapse: collapse;
+    margin: 20px 0;
+}
+
+.rst-content table.docutils th {
+    background: var(--bio-green);
+    color: white;
+    padding: 12px;
+}
+
+.rst-content table.docutils td {
+    padding: 10px;
+    border: 1px solid #ddd;
+}
+
+/* Emoji support */
+.emoji {
+    font-style: normal;
+    font-size: 1.2em;
+}
