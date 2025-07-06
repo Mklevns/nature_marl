@@ -50,18 +50,17 @@ This is a standard and powerful paradigm in MARL that we fully embrace. During *
 
 This repository is organized into modular components, each with a specific responsibility:
 
-| File/Module                     | Role                                                                                                                                                                             |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `main_trainer.py`               | **Main Entry Point.** The unified script to run all experiments. Parses arguments and orchestrates the entire training pipeline.                                      |
-| `rl_module.py`                  | **The Agent's Brain.** Defines the `NatureInspiredCommModule`, which contains the neural network architecture for perception, memory, and communication.                    |
-| `emergence_environments.py`     | **The Simulation Worlds.** Implements various `PettingZoo`-style multi-agent environments designed to create pressures for communication to emerge.       |
-| `reward_engineering_wrapper.py` | **Metrics & Reward Injection.** A crucial `PettingZoo` wrapper that calculates implicit rewards and captures `CommunicationEvent` objects for analysis by the callbacks. |
-| `real_emergence_callbacks.py`   | **The Analysis Engine.** An RLlib `DefaultCallbacks` class that calculates and logs all custom emergence and hardware performance metrics during training.    |
-| `training_config.py`            | **Hardware-Aware Config Factory.** Detects system hardware and generates an optimized `PPOConfig` to maximize training performance. |
-| `communication_metrics.py`      | **Metrics Definitions.** Defines the `CommunicationAnalyzer` and the data structures used to quantify communication patterns like mutual information and protocol stability.         |
-| `ray_config.py`                 | **Centralized Ray Config.** Provides helper functions for initializing Ray and creating baseline PPO configurations according to the new API stack.              |
-
------
+| File/Module                                          | Role                                                                                                                                                                             |
+| -----------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main_trainer.py`                                    | **Main Entry Point.** The unified script to run all experiments. Parses arguments and orchestrates the entire training pipeline.                                                 |
+| `marlcomm/models/rl_module.py`                       | **The Agent's Brain.** Defines the `NatureInspiredCommModule`, which contains the neural network architecture for perception, memory, and communication.                         |
+| `marlcomm/enviroments/emergence_environments.py`     | **The Simulation Worlds.** Implements various `PettingZoo`-style multi-agent environments designed to create pressures for communication to emerge.                              |
+| `marlcomm/utils/wrappers.py`                         | **Metrics & Reward Injection.** A crucial `PettingZoo` wrapper that calculates implicit rewards and captures `CommunicationEvent` objects for analysis by the callbacks.         |
+| `marlcomm/utils/callbacks.py`                        | **The Analysis Engine.** An RLlib `DefaultCallbacks` class that calculates and logs all custom emergence and hardware performance metrics during training.                       |
+| `marlcomm/config/training_config.py`                 | **Hardware-Aware Config Factory.** Detects system hardware and generates an optimized `PPOConfig` to maximize training performance.                                              |
+| `marlcomm/utils/metrics.py`                          | **Metrics Definitions.** Defines the `CommunicationAnalyzer` and the data structures used to quantify communication patterns like mutual information and protocol stability.     |
+| `marlcomm/config/ray_config.py`                      | **Centralized Ray Config.** Provides helper functions for initializing Ray and creating baseline PPO configurations according to the new API stack.                              |
+|------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 
 ## 🛠️ Setup and Installation
 
