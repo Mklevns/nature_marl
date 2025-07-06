@@ -569,27 +569,35 @@ class ProductionUnifiedBioInspiredRLModule(TorchRLModule):
 
     def __init__(
         self,
-        observation_space,
-        action_space,
-        *,
-        model_config: Optional[Dict[str, Any]] = None,
+        config: Optional[Dict[str, Any]] = None,
         **kwargs
     ) -> None:
         """
         Initialize the production bio-inspired RL module.
 
         Args:
-            observation_space: Single agent observation space
-            action_space: Single agent action space
-            model_config: Model configuration dictionary
+            config: Configuration dictionary containing:
+                - observation_space: Single agent observation space
+                - action_space: Single agent action space
+                - model_config: Model configuration dictionary
             **kwargs: Additional RLModule parameters
         """
-        super().__init__(
-            observation_space=observation_space,
-            action_space=action_space,
-            model_config=model_config or {},
-            **kwargs
-        )
+        # Extract components from config
+        if config is None:
+            config = {}
+
+        # RLlib 2.9.x passes spaces through config
+        observation_space = config.get("observation_space")
+        action_space = config.get("action_space")
+        model_config = config.get("model_config", {})
+
+        # Store for later use
+        self.observation_space = observation_space
+        self.action_space = action_space
+        self.model_config = model_config
+
+        # Call parent init with config
+        super().__init__(config=config, **kwargs)
 
         # Configure logging level based on debug mode
         self.debug_mode = self.model_config.get("debug_mode", False)
