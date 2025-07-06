@@ -1,347 +1,369 @@
-# File: marlcomm/training_config.py
-#!/usr/bin/env python3
+# marlcomm/config/training_config.py
 """
-Training Configuration for Nature-Inspired Multi-Agent Reinforcement Learning
-
-This module provides hardware-aware training configurations that automatically
-optimize for the available GPU/CPU resources while following Ray RLlib new API stack
-best practices.
+Modern training configuration using RLlib 2.9.x fluent API.
 """
 
-import os
-import torch
 from typing import Dict, Any, Optional
-from dataclasses import dataclass
 from ray.rllib.algorithms.ppo import PPOConfig
-from ray.rllib.policy.policy import PolicySpec
-from ray.rllib.algorithms.callbacks import DefaultCallbacks
-from ray.tune.tune_config import TuneConfig
-from ray.air.config import FailureConfig
+from ray.rllib.core.rl_module.rl_module import SingleAgentRLModuleSpec
+from ray.rllib.core.rl_module.marl_module import MultiAgentRLModuleSpec
+from ray.tune.registry import register_env
 
-# Import centralized Ray 2.9.0 configuration
-from ray_config import get_ray_init_kwargs, get_ppo_config_for_nature_marl
-
-
-@dataclass
-class HardwareInfo:
-    """Container for detected hardware information."""
-    gpu_available: bool
-    gpu_name: str
-    gpu_memory_gb: float
-    cpu_count: int
-    ram_gb: float
-    recommended_mode: str
+# Import your models from rl_module
+from marlcomm.models import BioInspiredRLModule
+from marlcomm.environments.emergence_environments import (
+    CommunicationEnv,  # Adjust based on your actual environment names
+)
 
 
-def detect_hardware() -> HardwareInfo:
+def create_bio_inspired_ppo_config(
+    env_name: str = "CommEnv-v0",
+    num_workers: int = 4,
+    num_gpus: int = 1,
+    framework: str = "torch",
+    experiment_config: Optional[Dict[str, Any]] = None
+) -> PPOConfig:
     """
-    Detect available hardware and provide recommendations.
-    
+    Create a modern PPOConfig for bio-inspired multi-agent training.
+
+    Args:
+        env_name: Name of the registered environment
+        num_workers: Number of parallel rollout workers
+        num_gpus: Number of GPUs to use
+        framework: Deep learning framework ("torch" or "tf2")
+        experiment_config: Additional experiment-specific settings
+
     Returns:
-        HardwareInfo object with detected specifications
+        Configured PPOConfig object ready for training
     """
-    # Check GPU availability and specs
-    gpu_available = torch.cuda.is_available()
-    gpu_name = torch.cuda.get_device_name(0) if gpu_available else "None"
-    gpu_memory_gb = 0.0
-    
-    if gpu_available:
-        try:
-            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-        except Exception:
-            gpu_memory_gb = 0.0
-    
-    # Check CPU and RAM (with fallback if psutil not available)
-    try:
-        import psutil
-        cpu_count = psutil.cpu_count(logical=True)
-        ram_gb = psutil.virtual_memory().total / (1024**3)
-    except ImportError:
-        print("📦 Note: Install 'psutil' for detailed hardware info: pip install psutil")
-        cpu_count = os.cpu_count() or 4
-        ram_gb = 16.0  # Conservative estimate
-    
-    # Determine recommended training mode
-    if gpu_available and gpu_memory_gb > 8 and ram_gb > 16:
-        recommended_mode = "gpu"
-    elif cpu_count >= 8 and ram_gb > 8:
-        recommended_mode = "cpu"
-    else:
-        recommended_mode = "cpu"
-    
-    return HardwareInfo(
-        gpu_available=gpu_available,
-        gpu_name=gpu_name,
-        gpu_memory_gb=gpu_memory_gb,
-        cpu_count=cpu_count,
-        ram_gb=ram_gb,
-        recommended_mode=recommended_mode
+
+    exp_config = experiment_config or {}
+
+    # Bio-inspired parameters
+    use_pheromones = exp_config.get("use_pheromones", True)
+    use_plasticity = exp_config.get("use_plasticity", True)
+    comm_channel_dim = exp_config.get("comm_channel_dim", 16)
+    plasticity_rate = exp_config.get("plasticity_rate", 0.001)
+    hidden_dim = exp_config.get("hidden_dim", 64)
+
+    # Create base PPO configuration with fluent API
+    config = (
+        PPOConfig()
+        .environment(
+            env=env_name,
+            env_config={
+                "grid_size": exp_config.get("grid_size", (10, 10)),
+                "n_agents": exp_config.get("n_agents", 2),
+                "episode_limit": exp_config.get("episode_limit", 100),
+                "reward_type": exp_config.get("reward_type", "sparse"),
+                "enable_pheromones": use_pheromones,
+            },
+            render_env=False,
+            clip_rewards=exp_config.get("clip_rewards", None),
+            normalize_actions=False,
+        )
+        .rollouts(
+            num_rollout_workers=num_workers,
+            num_envs_per_worker=exp_config.get("num_envs_per_worker", 1),
+            batch_mode="complete_episodes",
+            rollout_fragment_length="auto",
+            enable_connectors=True,
+            compress_observations=False,
+            sampler_perf_stats_ema_coef=None,
+        )
+        .training(
+            # PPO-specific hyperparameters
+            lambda_=0.95,
+            gamma=exp_config.get("gamma", 0.99),
+            lr=exp_config.get("learning_rate", 3e-4),
+            num_sgd_iter=exp_config.get("num_sgd_iter", 10),
+            sgd_minibatch_size=exp_config.get("sgd_minibatch_size", 128),
+            train_batch_size=exp_config.get("train_batch_size", 4000),
+            clip_param=exp_config.get("clip_param", 0.2),
+            vf_clip_param=exp_config.get("vf_clip_param", 10.0),
+            entropy_coeff=exp_config.get("entropy_coeff", 0.01),
+            vf_loss_coeff=exp_config.get("vf_loss_coeff", 0.5),
+            kl_target=exp_config.get("kl_target", 0.01),
+            kl_coeff=exp_config.get("kl_coeff", 0.2),
+
+            # Gradient settings
+            grad_clip=exp_config.get("grad_clip", 0.5),
+            grad_clip_by="global_norm",
+
+            # Learning rate schedule (optional)
+            lr_schedule=exp_config.get("lr_schedule", None) or [
+                [0, exp_config.get("learning_rate", 3e-4)],
+                [exp_config.get("total_timesteps", 1e6), 1e-5]
+            ],
+        )
+        .resources(
+            num_gpus=num_gpus,
+            num_cpus_per_worker=1,
+            num_gpus_per_learner_worker=num_gpus / max(1, num_workers) if num_gpus > 0 else 0,
+            custom_resources_per_worker={},
+        )
+        .framework(
+            framework=framework,
+            eager_tracing=False,
+        )
+        .debugging(
+            seed=exp_config.get("seed", 42),
+            log_level=exp_config.get("log_level", "INFO"),
+            log_sys_usage=True,
+        )
+        .reporting(
+            keep_per_episode_custom_metrics=True,
+            metrics_num_episodes_for_smoothing=exp_config.get("smoothing_episodes", 10),
+            min_sample_timesteps_per_iteration=1000,
+            min_time_s_per_iteration=None,
+        )
+        .experimental(
+            _enable_new_api_stack=True,
+            _disable_preprocessor_api=True,
+            _disable_action_flattening=True,
+        )
+        .fault_tolerance(
+            recreate_failed_workers=True,
+            max_num_worker_restarts=1000,
+            delay_between_worker_restarts_s=60.0,
+        )
     )
 
-
-class NatureCommCallbacks(DefaultCallbacks):
-    """
-    Enhanced callbacks for monitoring nature-inspired communication patterns.
-    
-    Tracks communication effectiveness, coordination metrics, and learning progress
-    inspired by studies of animal communication networks.
-    """
-    
-    def __init__(self):
-        super().__init__()
-        self.coordination_history = []
-        self.communication_metrics = []
-    
-    def on_episode_start(self, *, episode, **kwargs):
-        """Initialize episode-level metrics."""
-        episode.custom_metrics["communication_entropy"] = 0.0
-        episode.custom_metrics["coordination_efficiency"] = 0.0
-        episode.custom_metrics["collective_reward"] = 0.0
-    
-    def on_episode_step(self, *, episode, **kwargs):
-        """Track step-by-step communication patterns."""
-        # In a full implementation, this would analyze communication signals
-        # between agents to measure coordination effectiveness
-        pass
-    
-    def on_episode_end(self, *, episode, **kwargs):
-        """Calculate episode-level communication and coordination metrics."""
-        # Calculate simulated communication metrics
-        # In real implementation, would analyze actual communication patterns
-        
-        import numpy as np
-        
-        # Simulate communication entropy (information diversity)
-        comm_entropy = np.random.uniform(0.4, 1.0)
-        
-        # Simulate coordination efficiency (how well agents work together)  
-        coord_efficiency = np.random.uniform(0.5, 1.0)
-        
-        # Calculate collective reward (sum of all agent rewards)
-        collective_reward = sum(episode.agent_rewards.values())
-        
-        # Store metrics
-        episode.custom_metrics["communication_entropy"] = comm_entropy
-        episode.custom_metrics["coordination_efficiency"] = coord_efficiency
-        episode.custom_metrics["collective_reward"] = collective_reward
-        
-        # Track history for trend analysis
-        self.coordination_history.append(coord_efficiency)
-        self.communication_metrics.append(comm_entropy)
-    
-    def on_train_result(self, *, algorithm, result, **kwargs):
-        """Log aggregated communication insights."""
-        if len(self.coordination_history) > 0:
-            # Calculate moving averages for stability
-            recent_coordination = self.coordination_history[-10:]  # Last 10 episodes
-            recent_communication = self.communication_metrics[-10:]
-            
-            result["custom_metrics"]["avg_coordination_efficiency"] = sum(recent_coordination) / len(recent_coordination)
-            result["custom_metrics"]["avg_communication_entropy"] = sum(recent_communication) / len(recent_communication)
-            
-            # Reset histories periodically to prevent memory growth
-            if len(self.coordination_history) > 100:
-                self.coordination_history = self.coordination_history[-50:]
-                self.communication_metrics = self.communication_metrics[-50:]
-
-
-class TrainingConfigFactory:
-    """
-    Factory class for creating hardware-optimized training configurations.
-    
-    Automatically detects hardware capabilities and creates appropriate
-    PPO configurations following Ray RLlib new API stack best practices.
-    """
-    
-    def __init__(self, hardware_info: Optional[HardwareInfo] = None):
-        """
-        Initialize configuration factory.
-        
-        Args:
-            hardware_info: Optional pre-detected hardware info
-        """
-        self.hardware_info = hardware_info or detect_hardware()
-        
-    def create_gpu_config(self, obs_space, act_space) -> PPOConfig:
-        """
-        Create GPU-optimized training configuration.
-        
-        Args:
-            obs_space: Environment observation space
-            act_space: Environment action space
-            
-        Returns:
-            PPO configuration optimized for GPU training
-        """
-        from rl_module import create_nature_comm_module_spec
-        
-        # Conservative GPU settings to prevent OOM
-        config = (
-            PPOConfig()
-            .environment(env="nature_marl_comm", env_config={"debug": False})
-            .framework("torch")  # New API stack requires PyTorch
-            .resources(
-                num_gpus=1,  # Use single GPU
-            )
-            .rollouts(
-                num_rollout_workers=4,  # Conservative worker count
-                num_envs_per_worker=1,  # Single env per worker for stability
-                
-            )
-            
-            .rl_module(
-                rl_module_spec=create_nature_comm_module_spec(
-                    obs_space, act_space, 
-                    model_config={"comm_channels": 8, "memory_size": 16}
-                )
-            )
-            .callbacks(NatureCommCallbacks)
-            .multi_agent(
-                policies={"shared_policy": PolicySpec()},
-                policy_mapping_fn=lambda agent_id, episode, **kwargs: "shared_policy",
-            )
-            .training(
-                # New API stack parameters
-                train_batch_size=1024,  # Conservative for memory
-                sgd_minibatch_size=128,  # Smaller minibatches for GPU memory
-                lr=3e-4,
-                gamma=0.95,
-                lambda_=0.95,
-                clip_param=0.2,
-                vf_loss_coeff=0.5,
-                entropy_coeff=0.01,
-                num_sgd_iter=8,  # Reduced epochs to prevent memory buildup
-                grad_clip=0.5,
-                use_critic=True,
-                use_gae=True,
-            )
-        )
-        
-        return config
-    
-    def create_cpu_config(self, obs_space, act_space) -> PPOConfig:
-        """
-        Create CPU-optimized training configuration.
-        
-        Args:
-            obs_space: Environment observation space
-            act_space: Environment action space
-            
-        Returns:
-            PPO configuration optimized for CPU training
-        """
-        from rl_module import create_nature_comm_module_spec
-        
-        # Maximize CPU utilization
-        max_workers = min(self.hardware_info.cpu_count - 2, 12)  # Leave some cores free
-        
-        config = (
-            PPOConfig()
-            .environment(env="nature_marl_comm", env_config={"debug": False})
-            .framework("torch")
-            .resources(
-                num_gpus=0,  # CPU-only training
-            )
-            .rollouts(
-                num_rollout_workers=max_workers,
-                num_envs_per_worker=1,
-                
-            )
-            
-            .rl_module(
-                rl_module_spec=create_nature_comm_module_spec(
-                    obs_space, act_space,
-                    model_config={"comm_channels": 8, "memory_size": 16}
-                )
-            )
-            .callbacks(NatureCommCallbacks)
-            .multi_agent(
-                policies={"shared_policy": PolicySpec()},
-                policy_mapping_fn=lambda agent_id, episode, **kwargs: "shared_policy",
-            )
-            .training(
-                train_batch_size_per_learner=512,  # CPU-friendly batch size
-                minibatch_size=64,  # Smaller minibatches for CPU
-                lr=3e-4,
-                gamma=0.95,
-                lambda_=0.95,
-                clip_param=0.2,
-                vf_loss_coeff=0.5,
-                entropy_coeff=0.01,
-                num_epochs=10,
-                grad_clip=0.5,
-                use_critic=True,
-                use_gae=True,
-            )
-        )
-        
-        return config
-    
-    def create_config(self, obs_space, act_space, force_mode: Optional[str] = None) -> PPOConfig:
-        """
-        Create optimal training configuration based on detected hardware.
-        
-        Args:
-            obs_space: Environment observation space
-            act_space: Environment action space
-            force_mode: Optional mode override ("gpu" or "cpu")
-            
-        Returns:
-            Optimized PPO configuration
-        """
-        # Determine training mode
-        mode = force_mode or self.hardware_info.recommended_mode
-        
-        print(f"🔧 Creating {mode.upper()} training configuration")
-        print(f"   Hardware: {self.hardware_info.gpu_name} | "
-              f"{self.hardware_info.cpu_count} CPUs | "
-              f"{self.hardware_info.ram_gb:.1f}GB RAM")
-        
-        if mode == "gpu" and self.hardware_info.gpu_available:
-            return self.create_gpu_config(obs_space, act_space)
-        else:
-            return self.create_cpu_config(obs_space, act_space)
-    
-    def get_tune_config(self, num_iterations: int = 20) -> Dict[str, Any]:
-        """
-        Get Ray Tune configuration for training.
-        
-        Args:
-            num_iterations: Number of training iterations
-            
-        Returns:
-            Ray Tune RunConfig parameters
-        """
-        return {
-            "stop": {"training_iteration": num_iterations},
-            "checkpoint_config": {
-                "checkpoint_frequency": 10,
-                "num_to_keep": 3
-            },
-            "failure_config": FailureConfig(max_failures=2),
-            "name": "nature_marl_communication"
+    # Configure multi-agent setup if needed
+    if exp_config.get("multi_agent", True):
+        # Model configuration for each agent type
+        speaker_model_config = {
+            "is_speaker": True,
+            "comm_channel_dim": comm_channel_dim,
+            "use_pheromones": use_pheromones,
+            "use_plasticity": use_plasticity,
+            "plasticity_rate": plasticity_rate,
+            "hidden_dim": hidden_dim,
+            "grid_size": exp_config.get("grid_size", (10, 10)),
         }
 
+        listener_model_config = {
+            "is_speaker": False,
+            "comm_channel_dim": comm_channel_dim,
+            "use_pheromones": use_pheromones,
+            "use_plasticity": use_plasticity,
+            "plasticity_rate": plasticity_rate,
+            "hidden_dim": hidden_dim,
+            "grid_size": exp_config.get("grid_size", (10, 10)),
+        }
 
-def print_hardware_summary():
-    """Print a summary of detected hardware."""
-    hw = detect_hardware()
-    
-    print("💻 Hardware Detection Summary:")
-    print(f"   GPU: {hw.gpu_name} ({'Available' if hw.gpu_available else 'Not Available'})")
-    if hw.gpu_available:
-        print(f"   GPU Memory: {hw.gpu_memory_gb:.1f} GB")
-    print(f"   CPU Cores: {hw.cpu_count}")
-    print(f"   System RAM: {hw.ram_gb:.1f} GB")
-    print(f"   Recommended Mode: {hw.recommended_mode.upper()}")
-    
-    # Provide optimization suggestions
-    if hw.recommended_mode == "gpu":
-        print("✨ Recommendation: GPU mode for high-performance training")
+        # Set up multi-agent configuration
+        config = config.multi_agent(
+            # Policy mapping function
+            policy_mapping_fn=lambda agent_id, episode, worker, **kwargs: (
+                "speaker" if agent_id.startswith("speaker") else "listener"
+            ),
+
+            # Define which policies to train
+            policies_to_train=exp_config.get("policies_to_train", ["speaker", "listener"]),
+
+            # Count steps by agent
+            count_steps_by="agent_steps",
+        )
+
+        # Set up RLModule specs for multi-agent
+        config = config.rl_module(
+            rl_module_spec=MultiAgentRLModuleSpec(
+                module_specs={
+                    "speaker": SingleAgentRLModuleSpec(
+                        module_class=BioInspiredRLModule,
+                        model_config=speaker_model_config,
+                    ),
+                    "listener": SingleAgentRLModuleSpec(
+                        module_class=BioInspiredRLModule,
+                        model_config=listener_model_config,
+                    ),
+                }
+            ),
+        )
     else:
-        print("💪 Recommendation: CPU mode for stable training")
+        # Single agent configuration
+        config = config.rl_module(
+            rl_module_spec=SingleAgentRLModuleSpec(
+                module_class=BioInspiredRLModule,
+                model_config={
+                    "is_speaker": exp_config.get("is_speaker", True),
+                    "comm_channel_dim": comm_channel_dim,
+                    "use_pheromones": use_pheromones,
+                    "use_plasticity": use_plasticity,
+                    "plasticity_rate": plasticity_rate,
+                    "hidden_dim": hidden_dim,
+                    "grid_size": exp_config.get("grid_size", (10, 10)),
+                }
+            ),
+        )
+
+    # Add custom callbacks if provided
+    if exp_config.get("callbacks_class"):
+        config = config.callbacks(exp_config["callbacks_class"])
+
+    return config
 
 
-if __name__ == "__main__":
-    # Display hardware information when run directly
-    print_hardware_summary()
+# Predefined experiment configurations
+EXPERIMENT_CONFIGS = {
+    "baseline": {
+        "name": "Baseline (No Bio-Inspired)",
+        "use_pheromones": False,
+        "use_plasticity": False,
+        "comm_channel_dim": 16,
+        "n_agents": 2,
+        "grid_size": (10, 10),
+        "episode_limit": 100,
+        "total_timesteps": 1e6,
+        "learning_rate": 3e-4,
+        "train_batch_size": 4000,
+    },
+
+    "pheromones_only": {
+        "name": "Pheromone Communication Only",
+        "use_pheromones": True,
+        "use_plasticity": False,
+        "comm_channel_dim": 16,
+        "n_agents": 4,
+        "grid_size": (20, 20),
+        "episode_limit": 200,
+        "total_timesteps": 2e6,
+        "learning_rate": 3e-4,
+        "entropy_coeff": 0.01,
+    },
+
+    "plasticity_only": {
+        "name": "Neural Plasticity Only",
+        "use_pheromones": False,
+        "use_plasticity": True,
+        "plasticity_rate": 0.001,
+        "comm_channel_dim": 16,
+        "n_agents": 2,
+        "grid_size": (10, 10),
+        "episode_limit": 100,
+        "total_timesteps": 1e6,
+        "learning_rate": 3e-4,
+    },
+
+    "full_bio_inspired": {
+        "name": "Full Bio-Inspired System",
+        "use_pheromones": True,
+        "use_plasticity": True,
+        "plasticity_rate": 0.001,
+        "comm_channel_dim": 32,
+        "n_agents": 6,
+        "grid_size": (30, 30),
+        "episode_limit": 300,
+        "total_timesteps": 5e6,
+        "learning_rate": 1e-4,
+        "entropy_coeff": 0.02,
+        "num_sgd_iter": 20,
+        "train_batch_size": 8000,
+    },
+
+    "emergence_study": {
+        "name": "Emergent Communication Study",
+        "use_pheromones": True,
+        "use_plasticity": True,
+        "plasticity_rate": 0.005,
+        "comm_channel_dim": 64,
+        "n_agents": 8,
+        "grid_size": (40, 40),
+        "episode_limit": 500,
+        "total_timesteps": 1e7,
+        "learning_rate": 5e-5,
+        "entropy_coeff": 0.05,
+        "num_sgd_iter": 30,
+        "train_batch_size": 16000,
+        "sgd_minibatch_size": 256,
+        "num_workers": 8,
+    },
+
+    "scalability_test": {
+        "name": "Scalability Test",
+        "use_pheromones": True,
+        "use_plasticity": False,  # Disable for performance
+        "comm_channel_dim": 16,
+        "n_agents": 16,
+        "grid_size": (50, 50),
+        "episode_limit": 200,
+        "total_timesteps": 5e6,
+        "learning_rate": 1e-4,
+        "train_batch_size": 32000,
+        "sgd_minibatch_size": 512,
+        "num_workers": 16,
+        "num_envs_per_worker": 2,
+    },
+}
+
+
+def get_experiment_config(experiment_name: str) -> Dict[str, Any]:
+    """
+    Get a predefined experiment configuration.
+
+    Args:
+        experiment_name: Name of the experiment configuration
+
+    Returns:
+        Dictionary of experiment parameters
+
+    Raises:
+        ValueError: If experiment name is not found
+    """
+    if experiment_name not in EXPERIMENT_CONFIGS:
+        available = ", ".join(EXPERIMENT_CONFIGS.keys())
+        raise ValueError(
+            f"Unknown experiment: '{experiment_name}'. "
+            f"Available experiments: {available}"
+        )
+
+    return EXPERIMENT_CONFIGS[experiment_name].copy()
+
+
+def list_experiments():
+    """List all available experiment configurations."""
+    print("\nAvailable Experiment Configurations:")
+    print("-" * 50)
+    for name, config in EXPERIMENT_CONFIGS.items():
+        print(f"\n{name}:")
+        print(f"  Description: {config.get('name', 'N/A')}")
+        print(f"  Agents: {config.get('n_agents', 'N/A')}")
+        print(f"  Grid Size: {config.get('grid_size', 'N/A')}")
+        print(f"  Bio-Inspired Features:")
+        print(f"    - Pheromones: {config.get('use_pheromones', False)}")
+        print(f"    - Plasticity: {config.get('use_plasticity', False)}")
+        print(f"  Total Timesteps: {config.get('total_timesteps', 'N/A'):,.0f}")
+
+
+# Example usage function
+def create_config_for_experiment(experiment_name: str, **overrides) -> PPOConfig:
+    """
+    Create a PPOConfig for a specific experiment with optional overrides.
+
+    Example:
+        config = create_config_for_experiment(
+            "full_bio_inspired",
+            num_workers=8,
+            num_gpus=2,
+            learning_rate=1e-3
+        )
+    """
+    # Get base experiment config
+    exp_config = get_experiment_config(experiment_name)
+
+    # Apply overrides
+    exp_config.update(overrides)
+
+    # Extract system-level configs
+    num_workers = exp_config.pop("num_workers", 4)
+    num_gpus = exp_config.pop("num_gpus", 1)
+    framework = exp_config.pop("framework", "torch")
+
+    # Create and return PPOConfig
+    return create_bio_inspired_ppo_config(
+        num_workers=num_workers,
+        num_gpus=num_gpus,
+        framework=framework,
+        experiment_config=exp_config
+    )
